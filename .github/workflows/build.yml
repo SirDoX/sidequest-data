@@ -1,0 +1,86 @@
+name: Build street-network packs
+
+on:
+  schedule:
+    # Sundays 03:00 UTC; Geofabrik updates its extracts daily.
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  REGION_URL: https://download.geofabrik.de/europe/dach
+  NAME: dach
+  # Releases kept besides the new one; the app reads the latest.
+  KEEP_RELEASES: 2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        # The runner image ships ~30 GB of tools this job doesn't need.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q osmium-tool
+          pip install -r pipeline/requirements.txt
+
+      - name: Download extract
+        run: |
+          mkdir -p work
+          curl -sSfL -o work/region.osm.pbf "$REGION_URL-latest.osm.pbf"
+          curl -sSfL -o work/region.poly "$REGION_URL.poly"
+          ls -la work
+
+      - name: Keep only highways
+        # Also drops the nodes no highway uses, which keeps the node
+        # location index small enough for the runner's memory.
+        run: |
+          osmium tags-filter work/region.osm.pbf w/highway \
+            -o work/highways.osm.pbf --overwrite
+          rm work/region.osm.pbf
+          ls -la work
+
+      - name: Build packs
+        env:
+          TMPDIR: ${{ github.workspace }}/work
+          SORT_MEMORY: 6G
+        run: |
+          TAG="$(date -u +%Y-%m-%d)"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          python pipeline/build_packs.py work/highways.osm.pbf \
+            work/region.poly out "$NAME" "$TAG"
+          ls -la out
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" out/* \
+            --title "Street network $TAG" \
+            --notes "Walkable ways of $NAME from OpenStreetMap (© OpenStreetMap contributors, ODbL)." \
+            --latest
+          # Old releases: the app only reads the latest, keep a few for
+          # devices that are mid-download during the switch.
+          gh release list --limit 100 --json tagName --jq '.[].tagName' \
+            | tail -n +$((KEEP_RELEASES + 2)) \
+            | xargs -r -n1 gh release delete --yes --cleanup-tag

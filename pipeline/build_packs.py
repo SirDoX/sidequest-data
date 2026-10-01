@@ -36,11 +36,15 @@ from shapely.prepared import prep
 
 ZOOM = 13
 PART_LIMIT = 1_900_000_000
-FORMAT = 1
+FORMAT = 2
 
-# x, y, part, flags, offset, length. Flags: 1 = the tile crosses the
-# boundary of the extract (data beyond it is missing), 2 = no ways.
-INDEX_ENTRY = struct.Struct("<HHBBII")
+# x, y, part, flags, offset, length, street metres. Flags: 1 = the tile
+# crosses the boundary of the extract (data beyond it is missing), 2 = no
+# ways. Street metres: the streets that count for exploring (no sidewalks,
+# crossings or cycleway connectors), each piece between two nodes counted
+# in the tile of its middle, so the tiles of an area add up to its total.
+INDEX_ENTRY = struct.Struct("<HHBBIII")
+CONNECTORS = {"sidewalk", "crossing", "cycleway_connector"}
 FLAG_PARTIAL = 1
 FLAG_EMPTY = 2
 
@@ -157,9 +161,16 @@ def read_poly(path):
     return shape
 
 
-def write_ways(pbf, out):
+def piece_meters(a, b):
+    (lon1, lat1), (lon2, lat2) = a, b
+    x = (lon2 - lon1) * math.cos(math.radians((lat1 + lat2) / 2))
+    return math.hypot(x, lat2 - lat1) * 111195
+
+
+def write_ways(pbf, out, street_meters):
     """Pass over the extract: every walkable way, once per tile it touches,
-    as a line ``x,y<TAB>json`` (sorted afterwards)."""
+    as a line ``x,y<TAB>json`` (sorted afterwards). Adds the street length
+    per tile to [street_meters]."""
     count = 0
     processor = (
         osmium.FileProcessor(pbf)
@@ -191,6 +202,10 @@ def write_ways(pbf, out):
         )
         for x, y in tiles_along(coords):
             out.write(f"{x:05d},{y:05d}\t{record}\n")
+        if highway not in CONNECTORS:
+            for a, b in zip(coords, coords[1:]):
+                key = tile_of((a[1] + b[1]) / 2, (a[0] + b[0]) / 2)
+                street_meters[key] = street_meters.get(key, 0) + piece_meters(a, b)
         count += 1
     return count
 
@@ -206,7 +221,8 @@ def build(pbf, poly_path, out_dir, name, tag):
         # times the disk space of the extract.
         raw = os.path.join(tmp, "ways.tsv.gz")
         with gzip.open(raw, "wt", encoding="utf-8", compresslevel=1) as f:
-            ways = write_ways(pbf, f)
+            street_meters = {}
+            ways = write_ways(pbf, f, street_meters)
         print(f"{ways} walkable ways", flush=True)
         sort = subprocess.Popen(
             f"gzip -dc '{raw}' | sort -t \"$(printf '\\t')\" -k1,1 "
@@ -278,7 +294,10 @@ def build(pbf, poly_path, out_dir, name, tag):
 
     index_name = f"{name}-index.bin.gz"
     index = b"".join(
-        INDEX_ENTRY.pack(x, y, *entries[(x, y)]) for (x, y) in sorted(entries)
+        INDEX_ENTRY.pack(
+            x, y, *entries[(x, y)], round(street_meters.get((x, y), 0))
+        )
+        for (x, y) in sorted(entries)
     )
     with open(os.path.join(out_dir, index_name), "wb") as f:
         f.write(gzip.compress(index, compresslevel=9, mtime=0))

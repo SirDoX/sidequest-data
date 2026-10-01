@@ -44,11 +44,27 @@ jobs:
           pip install -r pipeline/requirements.txt
 
       - name: Download extract
+        # Several GB; the connection sometimes drops midway. Resume where it
+        # stopped, then compare with Geofabrik's checksum.
         run: |
           mkdir -p work
-          curl -sSfL -o work/region.osm.pbf "$REGION_URL-latest.osm.pbf"
-          curl -sSfL -o work/region.poly "$REGION_URL.poly"
-          ls -la work
+          cd work
+          curl -sSfL --retry 5 -o region.osm.pbf.md5 "$REGION_URL-latest.osm.pbf.md5"
+          curl -sSfL --retry 5 -o region.poly "$REGION_URL.poly"
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if curl -sSfL -C - -o region.osm.pbf "$REGION_URL-latest.osm.pbf"; then
+              break
+            fi
+            echo "Download interrupted (attempt $attempt), resuming in 30 s"
+            sleep 30
+          done
+          expected="$(cut -d' ' -f1 region.osm.pbf.md5)"
+          actual="$(md5sum region.osm.pbf | cut -d' ' -f1)"
+          if [ "$expected" != "$actual" ]; then
+            echo "Checksum mismatch: $actual, expected $expected"
+            exit 1
+          fi
+          ls -la
 
       - name: Keep only highways
         # Also drops the nodes no highway uses, which keeps the node

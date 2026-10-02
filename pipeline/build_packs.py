@@ -16,7 +16,10 @@ polyline6], ...]}`` with every way that touches the tile; the app splits
 them into segments exactly as it does with Overpass data. The filters
 below must stay in sync with the app's OverpassClient.
 
-Usage: build_packs.py EXTRACT.osm.pbf BOUNDARY.poly OUT_DIR NAME TAG
+With ADMIN.osm.pbf (boundaries and place nodes) the areas for the
+statistics are written too, see areas.py.
+
+Usage: build_packs.py EXTRACT.osm.pbf BOUNDARY.poly OUT_DIR NAME TAG [ADMIN.osm.pbf]
 """
 
 import gzip
@@ -32,6 +35,8 @@ from datetime import datetime, timezone
 
 import osmium
 from shapely.geometry import Polygon, box
+
+from areas import Pieces, write_areas
 from shapely.prepared import prep
 
 ZOOM = 13
@@ -167,10 +172,10 @@ def piece_meters(a, b):
     return math.hypot(x, lat2 - lat1) * 111195
 
 
-def write_ways(pbf, out, street_meters):
+def write_ways(pbf, out, street_meters, pieces):
     """Pass over the extract: every walkable way, once per tile it touches,
     as a line ``x,y<TAB>json`` (sorted afterwards). Adds the street length
-    per tile to [street_meters]."""
+    per tile to [street_meters] and each street piece to [pieces]."""
     count = 0
     processor = (
         osmium.FileProcessor(pbf)
@@ -204,13 +209,16 @@ def write_ways(pbf, out, street_meters):
             out.write(f"{x:05d},{y:05d}\t{record}\n")
         if highway not in CONNECTORS:
             for a, b in zip(coords, coords[1:]):
-                key = tile_of((a[1] + b[1]) / 2, (a[0] + b[0]) / 2)
-                street_meters[key] = street_meters.get(key, 0) + piece_meters(a, b)
+                lat, lon = (a[1] + b[1]) / 2, (a[0] + b[0]) / 2
+                key = tile_of(lat, lon)
+                meters = piece_meters(a, b)
+                street_meters[key] = street_meters.get(key, 0) + meters
+                pieces.add(key, lon, lat, meters)
         count += 1
     return count
 
 
-def build(pbf, poly_path, out_dir, name, tag):
+def build(pbf, poly_path, out_dir, name, tag, admin_pbf=None):
     os.makedirs(out_dir, exist_ok=True)
     boundary = read_poly(poly_path)
     inside = prep(boundary)
@@ -222,7 +230,8 @@ def build(pbf, poly_path, out_dir, name, tag):
         raw = os.path.join(tmp, "ways.tsv.gz")
         with gzip.open(raw, "wt", encoding="utf-8", compresslevel=1) as f:
             street_meters = {}
-            ways = write_ways(pbf, f, street_meters)
+            pieces = Pieces()
+            ways = write_ways(pbf, f, street_meters, pieces)
         print(f"{ways} walkable ways", flush=True)
         sort = subprocess.Popen(
             f"gzip -dc '{raw}' | sort -t \"$(printf '\\t')\" -k1,1 "
@@ -311,6 +320,15 @@ def build(pbf, poly_path, out_dir, name, tag):
         "parts": parts,
         "bbox": [west, south, east, north],
     }
+    if admin_pbf:
+        manifest["areas"] = write_areas(
+            admin_pbf,
+            pieces,
+            street_meters,
+            out_dir,
+            name,
+            (tile_of, tile_bounds, encode_polyline6),
+        )
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
     size = sum(os.path.getsize(os.path.join(out_dir, p)) for p in parts)
@@ -318,6 +336,6 @@ def build(pbf, poly_path, out_dir, name, tag):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 6:
+    if len(sys.argv) not in (6, 7):
         sys.exit(__doc__)
     build(*sys.argv[1:])

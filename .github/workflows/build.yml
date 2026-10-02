@@ -66,12 +66,15 @@ jobs:
           fi
           ls -la
 
-      - name: Keep only highways
-        # Also drops the nodes no highway uses, which keeps the node
-        # location index small enough for the runner's memory.
+      - name: Keep only highways and boundaries
+        # Also drops the nodes nothing uses, which keeps the node location
+        # index small enough for the runner's memory.
         run: |
           osmium tags-filter work/region.osm.pbf w/highway \
             -o work/highways.osm.pbf --overwrite
+          osmium tags-filter work/region.osm.pbf \
+            r/boundary=administrative n/place=city,town,village,hamlet \
+            -o work/admin.osm.pbf --overwrite
           rm work/region.osm.pbf
           ls -la work
 
@@ -83,7 +86,7 @@ jobs:
           TAG="$(date -u +%Y-%m-%d)"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           python pipeline/build_packs.py work/highways.osm.pbf \
-            work/region.poly out "$NAME" "$TAG"
+            work/region.poly out "$NAME" "$TAG" work/admin.osm.pbf
           ls -la out
 
       - name: Publish release
